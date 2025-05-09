@@ -1,0 +1,8 @@
+[package]
+name = "fec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bon = "3"
+reed-solomon-erasure = "6"
