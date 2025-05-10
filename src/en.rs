@@ -25,6 +25,10 @@ impl FecEncoder {
     pub fn group_data_count(&self) -> usize {
         self.group_data.len()
     }
+    pub fn skip_group(&mut self) {
+        self.group_data.clear();
+        self.group_id += 1;
+    }
     pub fn encode_data(&mut self, data: &[u8], buf: &mut [u8]) -> usize {
         let pos = {
             let symbol_global_id = SymbolGlobalId {
