@@ -37,7 +37,7 @@ impl FecDecoder {
         let min_group_id = hdr
             .symbol_global_id
             .group_id
-            .checked_sub(self.window_size.get());
+            .checked_sub(self.window_size.get() - 1);
         if let Some(min_group_id) = min_group_id {
             while let Some((first_group_id, _)) = self.window.first_key_value() {
                 if *first_group_id < min_group_id {
@@ -47,7 +47,9 @@ impl FecDecoder {
                 }
             }
         }
-        if self.window.len() == self.window_size.get().try_into().unwrap() {
+        if self.window.len() == self.window_size.get().try_into().unwrap()
+            && !self.window.contains_key(&hdr.symbol_global_id.group_id)
+        {
             return None;
         }
         let group = self
