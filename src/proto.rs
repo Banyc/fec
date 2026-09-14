@@ -39,11 +39,25 @@ pub(crate) fn data_to_symbol(data: &[u8], symbol_size: usize) -> Vec<u8> {
 }
 pub(crate) fn symbol_to_data(symbol: &[u8], buf: &mut [u8]) -> Option<usize> {
     let (hdr_len, data_len) = decode_data_symbol_hdr(symbol)?;
-    let data_buf = &symbol[hdr_len..];
-    let data = &data_buf[..data_len.into()];
+    let data_buf = symbol.get(hdr_len..)?;
+    let data = data_buf.get(..usize::from(data_len))?;
     let len = buf.len().min(data.len());
     buf[..len].copy_from_slice(&data[..len]);
     Some(len)
+}
+#[cfg(test)]
+#[test]
+fn test_symbol_to_data_rejects_an_out_of_range_length() {
+    // A reconstructed or corrupted symbol can declare a payload longer than
+    // the shard it arrived in, and a shard can be too short to hold the
+    // length header at all.  The conversion reports both instead of panicking
+    // on an out-of-range slice.
+    let mut symbol = vec![0_u8; 64];
+    symbol[..2].copy_from_slice(&u16::MAX.to_be_bytes());
+    let mut data = [0_u8; 32];
+    assert_eq!(symbol_to_data(&symbol, &mut data), None);
+    assert_eq!(symbol_to_data(&[0_u8; 1], &mut data), None);
+    assert_eq!(symbol_to_data(&[], &mut data), None);
 }
 #[cfg(test)]
 #[test]
