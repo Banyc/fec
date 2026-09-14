@@ -2,7 +2,10 @@ use std::num::NonZeroU8;
 
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
-use crate::proto::{PacketHeader, ParityHeader, SymbolGlobalId, data_to_symbol, encode_hdr};
+use crate::proto::{
+    HDR_SIZE, PacketHeader, ParityHeader, SymbolGlobalId, data_to_symbol, decode_data_symbol_hdr,
+    encode_hdr,
+};
 
 #[derive(Debug)]
 pub struct FecEncoder {
@@ -24,6 +27,21 @@ impl FecEncoder {
 impl FecEncoder {
     pub fn group_data_count(&self) -> usize {
         self.group_data.len()
+    }
+
+    /// The longest information prefix among the open group's data symbols: a
+    /// stored shard is its data-symbol header followed by its payload, and
+    /// every byte past that prefix is the zero pad.  The parity of an all-zero
+    /// column is zero, so a parity shard is informative only up to this length
+    /// — the cap a parity datagram can be trimmed to without losing anything.
+    fn group_information_len(&self) -> usize {
+        self.group_data
+            .iter()
+            .filter_map(|symbol| decode_data_symbol_hdr(symbol))
+            .map(|(hdr_len, data_len)| hdr_len + usize::from(data_len))
+            .max()
+            .unwrap_or(self.symbol_size)
+            .min(self.symbol_size)
     }
     pub fn skip_group(&mut self) {
         self.group_data.clear();
@@ -56,6 +74,7 @@ impl FecEncoder {
             .map(|_| vec![0; self.symbol_size])
             .collect();
         en.encode_sep(&self.group_data, &mut parities).unwrap();
+        let information_len = self.group_information_len();
         let group_id = self.group_id;
         self.group_data.clear();
         self.group_id += 1;
@@ -63,6 +82,7 @@ impl FecEncoder {
             group_id,
             data_count: NonZeroU8::new(data_count.try_into().unwrap()).unwrap(),
             parity_count,
+            information_len,
             left_parities: parities,
         }
     }
@@ -73,6 +93,10 @@ pub struct FecParityEncoder {
     group_id: u64,
     data_count: NonZeroU8,
     parity_count: u8,
+    /// Longest information prefix in the flushed group.  The parity datagram is
+    /// trimmed to it: the bytes past it are the zero pad in every data shard, so
+    /// the parity bytes there are zero too and trimming them loses nothing.
+    information_len: usize,
     left_parities: Vec<Vec<u8>>,
 }
 impl FecParityEncoder {
@@ -91,12 +115,15 @@ impl FecParityEncoder {
                 parity_count: self.parity_count,
             }),
         };
+        // The datagram is the header plus the group's information prefix; the
+        // trailing zero pad carries no information and is not sent.
+        let parity_len = parity.len().min(self.information_len);
+        assert!(
+            buf.len() >= HDR_SIZE + parity_len,
+            "the parity buffer must hold the header plus the information prefix"
+        );
         let hdr_len = encode_hdr(hdr, buf);
         let parity_buf = &mut buf[hdr_len..];
-        if parity_buf.len() < parity.len() {
-            panic!();
-        }
-        let parity_len = parity_buf.len().min(parity.len());
         parity_buf[..parity_len].copy_from_slice(&parity[..parity_len]);
         Some(hdr_len + parity_len)
     }

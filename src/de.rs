@@ -151,8 +151,9 @@ mod tests {
     }
 
     /// Encode two symbols into one group and return the first symbol's wire
-    /// datagram, the group's full parity datagram, and the parity's header
-    /// length, so a caller can cap the parity at any prefix of the shard.
+    /// datagram, the group's parity datagram (trimmed to the group's information
+    /// prefix), and the parity header length, so a caller can cap the parity at
+    /// any prefix of the shard.
     fn group_with_parity() -> (Vec<u8>, Vec<u8>, usize) {
         let mut encoder = FecEncoder::builder().symbol_size(SYMBOL_SIZE).build();
         let mut wire = [0_u8; 2 * SYMBOL_SIZE];
@@ -161,8 +162,7 @@ mod tests {
         encoder.encode_data(&PAYLOAD, &mut wire);
         let mut parity = encoder.flush_parities(1);
         let parity_len = parity.encode_parity(&mut wire).unwrap();
-        let hdr_len = parity_len - SYMBOL_SIZE;
-        (first, wire[..parity_len].to_vec(), hdr_len)
+        (first, wire[..parity_len].to_vec(), crate::proto::HDR_SIZE)
     }
 
     /// Recover the group's second symbol from a parity datagram capped at
@@ -185,19 +185,23 @@ mod tests {
         recovered
     }
 
-    /// A sender may cap a parity datagram at its group's longest information
-    /// prefix instead of the full padded shard: every shard byte past that
-    /// prefix is a zero pad, so the parity bytes there are zero too and the cap
-    /// loses no information.  The decoder must zero-extend the received prefix
-    /// back to the full shard length, because `reconstruct_data` rejects
-    /// present shards of differing lengths as `IncorrectShardSize` and the
-    /// group would otherwise recover nothing at all.
+    /// A parity datagram carries information only up to the group's longest
+    /// information prefix, and the encoder trims it there instead of sending the
+    /// zero pad.  The decoder must zero-extend the received prefix back to the
+    /// full shard length, because `reconstruct_data` rejects present shards of
+    /// differing lengths as `IncorrectShardSize` and a group with a present
+    /// sibling would otherwise recover nothing at all.
     #[test]
     fn capped_parity_prefix_recovers_the_missing_symbol_exactly() {
         let (first, parity, hdr_len) = group_with_parity();
         // A member's information prefix is its data-symbol header plus its
         // payload — a payload-only cap would drop the header's parity bytes.
         let info_len = DATA_SYMBOL_HDR_SIZE + PAYLOAD.len();
+        assert_eq!(
+            parity.len(),
+            hdr_len + info_len,
+            "the encoder must send the information prefix alone"
+        );
         let recovered = recover_with_capped_parity(&first, &parity, hdr_len, info_len);
         assert_eq!(
             recovered.len(),
@@ -224,13 +228,14 @@ mod tests {
         );
     }
 
-    /// A cap that keeps the whole information prefix is exact whether or not
-    /// the trailing zero pad is present, so the cap only ever removes bytes
-    /// that carry no information.
+    /// A peer that sends the zero pad explicitly is recovered identically: the
+    /// trimmed tail is zero in the sender's pad and in the parity alike.
     #[test]
     fn a_full_shard_parity_recovers_the_missing_symbol_exactly() {
         let (first, parity, hdr_len) = group_with_parity();
-        let recovered = recover_with_capped_parity(&first, &parity, hdr_len, SYMBOL_SIZE);
+        let mut untrimmed = parity;
+        untrimmed.resize(hdr_len + SYMBOL_SIZE, 0);
+        let recovered = recover_with_capped_parity(&first, &untrimmed, hdr_len, SYMBOL_SIZE);
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0], PAYLOAD);
     }
