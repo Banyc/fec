@@ -10,6 +10,11 @@ pub struct FecDecoder {
     window: BTreeMap<u64, Group>,
     symbol_size: usize,
     max_group_size: usize,
+    /// Reconstructed symbols dropped because their own length header claims more
+    /// than their shard holds.  Nothing else in the decoder observes this: the
+    /// symbol never becomes a payload, so the caller cannot tell a rejected
+    /// reconstruction from a group that recovered nothing.
+    rejected_recovered_symbols: usize,
 }
 #[bon::bon]
 impl FecDecoder {
@@ -20,6 +25,7 @@ impl FecDecoder {
             window: BTreeMap::new(),
             symbol_size,
             max_group_size,
+            rejected_recovered_symbols: 0,
         }
     }
 }
@@ -58,6 +64,7 @@ impl FecDecoder {
             .or_default();
         group.push(hdr.symbol_global_id.symbol_id.into(), symbol);
         if let Some(parity) = hdr.parity {
+            let mut rejected = 0_usize;
             for symbol in group
                 .recover()
                 .data_count(parity.data_count.get().into())
@@ -66,13 +73,23 @@ impl FecDecoder {
             {
                 let mut buf = vec![0; symbol.len()];
                 let Some(n) = symbol_to_data(&symbol, &mut buf) else {
+                    rejected += 1;
                     continue;
                 };
                 recover(&buf[..n]);
             }
+            self.rejected_recovered_symbols += rejected;
             return None;
         }
         Some(hdr_len)
+    }
+
+    /// Reconstructed symbols rejected because they claim more than they hold.
+    /// The decoder is the only witness: a rejected symbol never becomes a
+    /// payload, so a caller cannot distinguish it from a group that recovered
+    /// nothing.
+    pub fn rejected_recovered_symbols(&self) -> usize {
+        self.rejected_recovered_symbols
     }
 
     /// Restore a received parity shard to this decoder's full shard length.
@@ -141,6 +158,33 @@ mod tests {
 
     const SYMBOL_SIZE: usize = 256;
     const PAYLOAD: [u8; 100] = [0xA5; 100];
+
+    /// The wire layout of a FEC datagram: the group and symbol identity, then —
+    /// for a parity — the group's data and parity counts, then the shard.
+    fn parity_datagram(data_count: u8, parity_count: u8, body: &[u8]) -> Vec<u8> {
+        let mut pkt = 0_u64.to_be_bytes().to_vec();
+        pkt.push(1);
+        pkt.push(data_count);
+        pkt.push(parity_count);
+        pkt.extend_from_slice(body);
+        pkt
+    }
+
+    /// A parity whose shard reconstructs a member claiming a 0xFFFF-byte
+    /// payload cannot fit its shard, so the member is dropped — and that drop is
+    /// counted, since nothing else in the decoder sees it.
+    #[test]
+    fn a_rejected_recovered_symbol_is_counted() {
+        let mut decoder = decoder();
+        let mut delivered = 0_usize;
+        assert!(
+            decoder
+                .decode(&parity_datagram(1, 1, &[0xFF; 8]), |_| delivered += 1)
+                .is_none()
+        );
+        assert_eq!(delivered, 0, "a rejected symbol must not be delivered");
+        assert_eq!(decoder.rejected_recovered_symbols(), 1);
+    }
 
     fn decoder() -> FecDecoder {
         FecDecoder::builder()
